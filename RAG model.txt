@@ -1,0 +1,273 @@
+from langchain_community.document_loaders.csv_loader import CSVLoader
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain_community.embeddings import HuggingFaceEmbeddings
+from langchain_community.vectorstores import Chroma
+from langchain_community.llms import HuggingFacePipeline
+from langchain.chains import RetrievalQA
+from transformers import pipeline, AutoTokenizer, AutoModelForSeq2SeqGeneration
+import pandas as pd
+import os
+
+class RAGPipeline:
+    def __init__(self, csv_path: str, persist_directory: str = "chroma_db"):
+        """
+        Initialize the RAG pipeline with paths for CSV and database storage.
+        
+        Args:
+            csv_path: Path to the CSV file
+            persist_directory: Directory to store ChromaDB
+        """
+        self.csv_path = csv_path
+        self.persist_directory = persist_directory
+        self.metadata_columns = None
+        self.vectorstore = None
+        self.llm = None
+        self.qa_chain = None
+
+    def load_and_split_documents(self):
+        """
+        Load CSV file and split content into chunks while preserving metadata.
+        """
+        # Read CSV to get column names for metadata
+        df = pd.read_csv(self.csv_path)
+        # Store all column names except the text column as metadata
+        self.metadata_columns = [col for col in df.columns if col != 'text']
+        
+        # Initialize CSV loader with metadata
+        loader = CSVLoader(
+            file_path=self.csv_path,
+            source_column="text",
+            metadata_columns=self.metadata_columns
+        )
+        documents = loader.load()
+        
+        # Split documents into chunks
+        text_splitter = RecursiveCharacterTextSplitter(
+            chunk_size=1000,
+            chunk_overlap=200,
+            separators=["\n\n", "\n", ".", "!", "?", ",", " ", ""]
+        )
+        split_documents = text_splitter.split_documents(documents)
+        return split_documents
+
+    def setup_vector_store(self, documents):
+        """
+        Create and persist vector store using ChromaDB and HuggingFace embeddings.
+        """
+        # Initialize HuggingFace embeddings
+        embeddings = HuggingFaceEmbeddings(
+            model_name="sentence-transformers/all-MiniLM-L6-v2",
+            model_kwargs={'device': 'cpu'}
+        )
+        
+        # Create and persist ChromaDB instance
+        self.vectorstore = Chroma.from_documents(
+            documents=documents,
+            embedding=embeddings,
+            persist_directory=self.persist_directory
+        )
+        self.vectorstore.persist()
+
+    def setup_llm(self):
+        """
+        Initialize the HuggingFace model for summarization.
+        """
+        # Load model and tokenizer
+        model_name = "facebook/bart-large-cnn"
+        tokenizer = AutoTokenizer.from_pretrained(model_name)
+        model = AutoModelForSeq2SeqGeneration.from_pretrained(model_name)
+        
+        # Create summarization pipeline
+        pipe = pipeline(
+            "summarization",
+            model=model,
+            tokenizer=tokenizer,
+            max_length=130,
+            min_length=30,
+            device='cpu'
+        )
+        
+        # Initialize LangChain HuggingFace pipeline
+        self.llm = HuggingFacePipeline(pipeline=pipe)
+
+    def setup_qa_chain(self):
+        """
+        Create the retrieval QA chain combining vector store and LLM.
+        """
+        self.qa_chain = RetrievalQA.from_chain_type(
+            llm=self.llm,
+            chain_type="stuff",
+            retriever=self.vectorstore.as_retriever(
+                search_kwargs={"k": 3}  # Retrieve top 3 relevant chunks
+            )
+        )
+
+    def query(self, question: str) -> dict:
+        """
+        Query the RAG pipeline and return results with source information.
+        
+        Args:
+            question: Query string
+            
+        Returns:
+            dict: Contains summary and source information
+        """
+        # Get relevant documents and generate summary
+        retrieved_docs = self.vectorstore.similarity_search(question, k=3)
+        
+        # Extract source information from metadata
+        sources = []
+        for doc in retrieved_docs:
+            source_info = {col: doc.metadata.get(col) for col in self.metadata_columns}
+            sources.append(source_info)
+        
+        # Generate summary using the QA chain
+        response = self.qa_chain(question)
+        
+        return {
+            "summary": response["result"],
+            "sources": sources
+        }
+
+    def build(self):
+        """
+        Build the complete RAG pipeline.
+        """
+        print("Loading and splitting documents...")
+        documents = self.load_and_split_documents()
+        
+        print("Setting up vector store...")
+        self.setup_vector_store(documents)
+        
+        print("Initializing LLM...")
+        self.setup_llm()
+        
+        print("Creating QA chain...")
+        self.setup_qa_chain()
+        
+        print("RAG pipeline ready!")
+
+# Example usage
+def main():
+    # Initialize and build the pipeline
+    csv_path = "your_data.csv"
+    rag = RAGPipeline(csv_path)
+    rag.build()
+    
+    # Example query
+    question = "What are the key points from the data?"
+    result = rag.query(question)
+    
+    print("\nSummary:", result["summary"])
+    print("\nSources:")
+    for source in result["sources"]:
+        print(source)
+
+if __name__ == "__main__":
+    main()
+
+
+
+
+============================================================
+
+
+
+
+
+Prepare the Environment:
+
+Install the required libraries:
+pip install langchain chromadb pandas transformers
+Load and Preprocess the CSV Data:
+
+Read the CSV file, extract text data, and ensure that metadata columns are available for tracking sources.
+Ingest Data into ChromaDB:
+
+Use ChromaDB to create a vector store. The text embeddings will be created using a suitable embedding model, like SentenceTransformers.
+Set up the RAG Pipeline:
+
+Retrieve relevant chunks from ChromaDB based on a query.
+Use metadata to include sources.
+Integrate HuggingFace Model:
+
+Use a summarization model from HuggingFace (e.g., facebook/bart-large-cnn) to summarize the retrieved chunks.
+Here’s the Python implementation:
+
+Full Pipeline Code
+import pandas as pd
+from langchain.document_loaders import DataFrameLoader
+from langchain.text_splitter import CharacterTextSplitter
+from langchain.embeddings import HuggingFaceEmbeddings
+from langchain.vectorstores import Chroma
+from langchain.chains import RetrievalQA
+from langchain.llms import HuggingFacePipeline
+from transformers import pipeline
+
+# Step 1: Load the CSV
+csv_file = "your_file.csv"  # Replace with your CSV file
+df = pd.read_csv(csv_file)
+
+# Step 2: Preprocess Data
+# Ensure there is a 'text' column and optional metadata columns in the CSV
+if 'text' not in df.columns:
+    raise ValueError("CSV must contain a 'text' column with the main content.")
+
+# Include metadata columns if needed (e.g., 'source', 'date', etc.)
+metadata_columns = [col for col in df.columns if col != 'text']
+
+# Step 3: Load Data into LangChain Document Loader
+loader = DataFrameLoader(df, page_content_column='text', metadata_columns=metadata_columns)
+documents = loader.load()
+
+# Step 4: Split Text into Chunks
+text_splitter = CharacterTextSplitter(chunk_size=500, chunk_overlap=50)
+docs = text_splitter.split_documents(documents)
+
+# Step 5: Embed and Store in ChromaDB
+embedding_model_name = "sentence-transformers/all-MiniLM-L6-v2"  # Choose a model
+embeddings = HuggingFaceEmbeddings(model_name=embedding_model_name)
+
+# Create ChromaDB vector store
+vector_store = Chroma.from_documents(docs, embeddings)
+
+# Step 6: Set up Retrieval
+retriever = vector_store.as_retriever(search_type="similarity", search_kwargs={"k": 5})
+
+# Step 7: HuggingFace LLM for Summarization
+summarizer = pipeline("summarization", model="facebook/bart-large-cnn")
+llm = HuggingFacePipeline(pipeline=summarizer)
+
+# Step 8: Create RetrievalQA Chain
+qa_chain = RetrievalQA(llm=llm, retriever=retriever)
+
+# Step 9: Query the Pipeline
+query = "Summarize content related to XYZ topic"  # Replace with your query
+result = qa_chain.run(query)
+
+# Display the result
+print("Summary:", result)
+Explanation of Key Components
+DataFrameLoader:
+
+Converts your CSV into documents while retaining metadata.
+Text Splitter:
+
+Ensures that long text is divided into manageable chunks.
+Embedding Model:
+
+Embeds text for similarity-based retrieval. The example uses SentenceTransformers.
+ChromaDB:
+
+Acts as the vector store for efficient retrieval of relevant chunks.
+HuggingFace Summarization:
+
+Summarizes the retrieved chunks using a pre-trained HuggingFace model.
+RetrievalQA Chain:
+
+Combines the retrieval and summarization into a seamless pipeline.
+Customization
+Replace embedding_model_name or summarizer with your preferred models.
+Adjust chunk_size and chunk_overlap based on the average size of your text.
+This pipeline is scalable, modular, and provides a clear way to add additional features like prompt tuning or multi-document summarization.
+
